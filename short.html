@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no" />
+    <script src="https://bitcoincore.tech/apps/bitcoinjs-ui/lib/bitcoinjs-lib.js"></script>
+    <script src="https://bundle.run/noble-secp256k1@1.2.14"></script>
+    <script src="https://bundle.run/browserify-cipher@1.0.1"></script>
+    <script src="https://bundle.run/buffer@6.0.3"></script>
+    <script src="https://bundle.run/varuint-bitcoin@1.1.2"></script>
+    <script src="https://supertestnet.github.io/bitcoin-chess/js/qrcode.js"></script>
+    <script src="bolt11.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-size: 1.15em;
+            font-family: Arial, sans-serif;
+        }
+        html {
+            max-width: 70ch;
+            padding: 3em 1em;
+            margin: auto;
+            line-height: 1.25;
+        }
+        h1 {
+            font-size: 2em;
+        }
+        h2 {
+            font-size: 1.5em;
+        }
+        input {
+            width: 100%;
+            height: 1.8em;
+            border: 1px solid grey;
+        }
+        #black-bg {
+            display: none;
+            width: 100%;
+            position: fixed;
+            top: 0;
+            left: 0;
+            background-color: #000;
+            opacity: .5;
+            width: 100vw;
+            height: 100vh;
+        }
+        #modal{
+            display: none;
+            position: fixed;
+            box-sizing: border-box;
+            top: 50%;
+            left: 50%;
+            transform: translate( -50%, -50% );
+            width: 100%;
+            max-width: 560px;
+            background-color: #fff;
+            border-radius: 10px;
+            padding: 20px;
+            color: #000;
+            text-align: center;
+            overflow-wrap: break-word;
+        }
+        #qr_code {
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <h1>Short bitcoin</h1>
+    <div id="balances" name="balances" style="display: none;">
+        <p>Bitcoin price (original: <span id="original_bitcoin_price" name="original_bitcoin_price" style="font-size: 1em;"></span>)</p>
+        <p><input type="text" id="bitcoin_price" name="bitcoin_price" disabled></p>
+        <p>Dollar balance</p>
+        <p><input type="text" id="dollar_balance" name="dollar_balance" disabled></p>
+        <p>Sats balance (original: <span id="original_sats_balance" name="original_sats_balance" style="font-size: 1em;"></span>)</p>
+        <p><input type="number" id="sats_balance" name="sats_balance" disabled></p>
+        <p>Difference</p>
+        <p><input type="text" id="sats_difference" name="sats_difference" disabled></p>
+        <p>Contract expiration</p>
+        <p><input type="text" id="expiry" name="expiry" disabled></p>
+        <p>Countdown</p>
+        <p><input type="text" id="countdown" name="countdown" disabled></p>
+        <p><button type="button" id="settle" name="settle" onclick="settle();">Settle</button></p>
+    </div>
+    <p>Your pubkey</p>
+    <p><input type="text" id="shorters_pubkey" name="shorters_pubkey" disabled></p>
+    <p>Enter an amount of dollars for your short contract (If you enter 100, you will get a $100 stable position, aka a $100 1x short position. If you enter 150, you will get a $150 stable position, etc. Minimum $10.)</p>
+    <p><input type="number" id="amount" name="amount" min="10" step="1" value="10"></p>
+    <p style="display: none;">Enter a bitcoin address to use as a fallback in case a lightning network payment fails</p>
+    <p><input type="hidden" id="my_address" name="my_address" value="bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"></p>
+    <p>Enter the pubkey of someone who wants to enter a long contract for the same amount as your short contract</p>
+    <p><input type="text" id="longers_pubkey" name="longers_pubkey"></p>
+    <p><button type="button" id="submitter" name="submitter" onclick='submitter( document.getElementsByName( "amount" )[ 0 ].value, document.getElementsByName( "longers_pubkey" )[ 0 ].value, false, false, false, document.getElementsByName( "my_address" )[ 0 ].value );'>Submit</button></p>
+    <script>
+        sessionStorage.clear();
+    </script>
+    <script>
+        function settle() {
+            //todo: instead of directly sending a settlement message to the oracle, send a signed message stating your desire to settle to your counterparty, who can then choose whether to cosign the settlement message and send it to the oracle -- the oracle should then settle the contract only if both parties agree to it -- and both parties should be warned in a confirm message that if they do this their counterparty will need to agree to the early settlement
+            if ( confirm( "Are you sure you want to settle now?" ) ) {
+                sendDM( `{"type":"settlement","content":"${sessionStorage[ "contract_id"]}"}`, trusted_oracles[ 0 ].substring( 2 ) );
+            }
+        }
+    </script>
+    <script>
+        function submitInvoice( invoice ) {
+            sessionStorage[ "invoice" ] = invoice;
+            modalVanish([4]);
+        }
+        function submitSettlementInvoice( invoice ) {
+            sessionStorage[ "settlement_invoice" ] = invoice;
+            modalVanish([5]);
+        }
+    </script>
+    <script>
+        function submitAddress( address ) {
+            sessionStorage[ "my_address" ] = address;
+            modalVanish([6]);
+        }
+    </script>
+    <script>
+        async function waitForInvoice() {
+            var invoice = sessionStorage[ "invoice" ];
+            return new Promise( function( resolve, reject ) {
+                if ( !invoice ) {
+                    setTimeout( async function() {
+                        var msg = await waitForInvoice();
+                        resolve( msg );
+                    }, 100 );
+                } else {
+                    resolve( invoice );
+                }
+            });
+        }
+        async function waitForSettlementInvoice() {
+            var invoice = sessionStorage[ "settlement_invoice" ];
+            return new Promise( function( resolve, reject ) {
+                if ( !invoice ) {
+                    setTimeout( async function() {
+                        var msg = await waitForSettlementInvoice();
+                        resolve( msg );
+                    }, 100 );
+                } else {
+                    resolve( invoice );
+                }
+            });
+        }
+    </script>
+    <script>
+        async function waitForAddress() {
+            var address = sessionStorage[ "my_address" ];
+            return new Promise( function( resolve, reject ) {
+                if ( !address ) {
+                    setTimeout( async function() {
+                        var msg = await waitForAddress();
+                        resolve( msg );
+                    }, 100 );
+                } else {
+                    resolve( address );
+                }
+            });
+        }
+    </script>
+    <script>
+        function isValidAddress( address ) {
+            try{
+                return ( typeof( bitcoinjs.address.toOutputScript( address ) ) == "object" );
+            } catch( e ) {
+                return false;
+            }
+        }
+    </script>
+    <script>
+        function isValidInvoice( invoice ) {
+            try{
+                return ( typeof( bolt11.decode( invoice ) ) == "object" );
+            } catch( e ) {
+                return false;
+            }
+        }
+    </script>
+    <script>
+        function getInvoiceSoftExpiry( invoice ) {
+            var decoded = bolt11.decode( invoice );
+            if ( decoded[ "timeExpireDate" ] ) {
+                return decoded[ "timeExpireDate" ] - decoded[ "timestamp" ];
+            } else {
+                return 3600;
+            }
+        }
+    </script>
+    <script>
+        function createQR( content ) {
+            var dataUriPngImage = document.createElement( "img" ),
+            s = QRCode.generatePNG( content, {
+                ecclevel: 'M',
+                format: 'html',
+                fillcolor: '#FFFFFF',
+                textcolor: '#000000',
+                margin: 4,
+                modulesize: 8,
+            });
+            dataUriPngImage.src = s;
+            dataUriPngImage.id = "qr_code";
+            return dataUriPngImage;
+        }
+    </script>
+    <script>
+        function waitSomeSeconds( num ) {
+          var num = num.toString() + "000";
+          num = Number( num );
+          return new Promise( function( resolve, reject ) {
+            setTimeout( function() { resolve( "" ); }, num );
+          });
+        }
+    </script>
+    <script>
+        async function submitter( amount, counterparty, time, bitcoin_price, claimed_contract, my_address ) {
+            if ( ( claimed_contract && bitcoin_price && Math.abs( claimed_contract[ "sats_deposit" ] - ( ( amount / bitcoin_price ) * 100000000 ) ) > 50 ) || claimed_contract && !claimed_contract[ "sats_deposit" ] ) {
+                sendDM( `{"type":"abort","content":"Aborting because your counterparty wants to deposit something way off from what you told them to, possibly due to major volatility. Sats you told them to deposit: ${String( claimed_contract[ "sats_deposit" ] )} What they want to deposit: ${String( ( ( amount / bitcoin_price ) * 100000000 ) )}"}`, counterparty );
+                var timeout = await waitSomeSeconds( 1 );
+                alert( `Oh no! What your counterparty wants you to deposit is way off from what it should be, possibly due to major volatility. Aborting. Sats you should deposit: ${String( ( ( amount / bitcoin_price ) * 100000000 ) )} What they want you to deposit: ${String( claimed_contract[ "sats_deposit" ] )}` );
+                window.location.reload();
+                return;
+            } else if ( claimed_contract && bitcoin_price ) {
+                console.log( "price they gave you:", bitcoin_price );
+                console.log( "Yay! Your counterparty wants you to deposit close enough to what you expect. Sats you should deposit:", String( ( ( amount / bitcoin_price ) * 100000000 ) ), "What they want you to deposit:", String( claimed_contract[ "sats_deposit" ] ) );
+                sessionStorage[ "contract_sats" ] = claimed_contract[ "sats_deposit" ];
+            }
+            amount = Number( amount );
+            document.getElementsByName( "dollar_balance" )[ 0 ].value = "$" + String( amount ) + ".00";
+            if ( !bitcoin_price ) {
+                var bitcoin_price = Number( sessionStorage[ "bitcoin_price" ] );
+            }
+            console.log( "bitcoin_price:", bitcoin_price );
+            if ( sessionStorage[ "contract_sats" ] ) {
+                var sats = Number( sessionStorage[ "contract_sats" ] );
+            } else {
+                var sats = ( amount / bitcoin_price ).toFixed( 8 ) * 100000000;
+                sats = Number( sats.toFixed( 0 ) );
+            }
+            if ( claimed_contract ) {
+                if ( !isValidInvoice( claimed_contract[ "longers_invoice" ] ) ) {
+                    alert( "oh no! They tried to send you an invalid invoice! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( getInvoiceAmount( claimed_contract[ "longers_invoice" ] ) != Number( sats ) ) {
+                    alert( `oh no! They sent you an invoice for the wrong amount! What's in their invoice: ${getInvoiceAmount( claimed_contract[ "longers_invoice" ] )} Needed amount: ${Number( sats )}` );
+                    window.location.reload();
+                    return;
+                }
+                if ( getInvoiceSoftExpiry( claimed_contract[ "shorters_invoice" ] ) < 1209600 ) {
+                    alert( `oh no! The invoice they sent you expires too soon! Aborting` );
+                    window.location.reload();
+                    return;
+                }
+            }
+            if ( !my_address ) {
+                if ( document.getElementsByName( "my_address" )[ 0 ].value ) {
+                    var my_address = document.getElementsByName( "my_address" )[ 0 ].value;
+                } else {
+                    document.getElementById( "modal" ).innerHTML = "";
+                    document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Enter a bitcoin address to use as a fallback in case a lightning network payment fails.</div>`;
+                    document.getElementById( "modal" ).innerHTML += '<p><input type="text" id="address" name="address"></p>';
+                    document.getElementById( "modal" ).innerHTML += `<p><button type="button" id="submit-address" name="submit-address" onclick='submitAddress( document.getElementsByName( "address" )[ 0 ].value )'>Submit</button></p>`;
+                    document.getElementById( "black-bg" ).style.display = "block";
+                    document.getElementById( "modal" ).style.display = "block";
+                    var my_address = await waitForAddress();
+                }
+            }
+            if ( my_address && !isValidAddress( my_address ) ) {
+                alert( "your bitcoin address wasn't valid, aborting" );
+                window.location.reload();
+                return;
+            }
+            console.log( [1], sats );
+            document.getElementsByName( "original_sats_balance" )[ 0 ].innerText = String( sats );
+            document.getElementsByName( "original_bitcoin_price" )[ 0 ].innerText = "$" + String( Number( sessionStorage[ "bitcoin_price" ] ).toFixed( 2 ) );
+            document.getElementsByName( "balances" )[ 0 ].style.display = "block";
+            document.getElementById( "modal" ).innerHTML = "";
+            document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Paste a lightning invoice for ${sats} sats and an expiry of 1209600. If you don't know how to do that, use Blixt wallet. You can set your expiry in the experimental section of the settings menu.</div>`;
+            document.getElementById( "modal" ).innerHTML += '<p><input type="text" id="invoice" name="invoice"></p>';
+            document.getElementById( "modal" ).innerHTML += `<p><button type="button" id="submit-invoice" name="submit-invoice" onclick='submitInvoice( document.getElementsByName( "invoice" )[ 0 ].value )'>Submit</button></p>`;
+            document.getElementById( "black-bg" ).style.display = "block";
+            document.getElementById( "modal" ).style.display = "block";
+            var invoice = await waitForInvoice();
+            console.log( [2], sats );
+            if ( !isValidInvoice( invoice ) ) {
+                sendDM( `{"type":"abort","content":"Aborting because your counterparty entered an invalid invoice"}`, counterparty );
+                var timeout = await waitSomeSeconds( 1 );
+                alert( "oh no! You entered an invalid invoice! Aborting" );
+                window.location.reload();
+                return;
+            }
+            if ( getInvoiceAmount( invoice ) != Number( sats ) ) {
+                sendDM( `{"type":"abort","content":"Aborting because your counterparty entered an invoice for the wrong amount"}`, counterparty );
+                var timeout = await waitSomeSeconds( 1 );
+                alert( "oh no! You entered an invoice for the wrong amount! Aborting" );
+                window.location.reload();
+                return;
+            }
+            if ( getInvoiceSoftExpiry( invoice ) < 1209600 ) {
+                sendDM( `{"type":"abort","content":"Aborting because your counterparty entered an invoice that expires too soon"}`, counterparty );
+                var timeout = await waitSomeSeconds( 1 );
+                alert( `oh no! You entered an invoice that expires too soon! Aborting` );
+                window.location.reload();
+                return;
+            }
+            console.log( [3], sats );
+            console.log( "invoice:", invoice );
+            sessionStorage[ "shorters_invoice" ] = invoice;
+            sessionStorage[ "shorters_hash" ] = getinvoicepmthash( invoice );
+            var real_contract_details = {}
+            real_contract_details[ "longers_key" ] = counterparty;
+            real_contract_details[ "shorters_key" ] = nostr_pubkey;
+            real_contract_details[ "shorters_invoice" ] = invoice;
+            if ( claimed_contract ) {
+                real_contract_details[ "longers_invoice" ] = claimed_contract[ "longers_invoice" ];
+            } else {
+                real_contract_details[ "longers_invoice" ] = "";
+            }
+            real_contract_details[ "oracles_short_invoice" ] = "";
+            real_contract_details[ "oracles_long_invoice" ] = "";
+            real_contract_details[ "oracles_signature" ] = "";
+            real_contract_details[ "contract_id" ] = "";
+            if ( !time ) {
+                var now = Math.floor( Date.now() / 1000 );
+                real_contract_details[ "timestamp_of_start" ] = now;
+            } else {
+                real_contract_details[ "timestamp_of_start" ] = time;
+            }
+            console.log( [4], sats );
+            real_contract_details[ "dollar_value" ] = amount;
+            real_contract_details[ "sats_deposit" ] = Number( sats );
+            real_contract_details[ "starting_price" ] = bitcoin_price;
+            var low_side = Number( ( ( 100000000 * amount ) / ( Number( sats ) + 546 ) ).toFixed( 2 ) );
+            var high_side = Number( ( ( 100000000 * amount ) / ( Number( sats ) - 546 ) ).toFixed( 2 ) );
+            real_contract_details[ "smallest_high_side_price" ] = high_side;
+            real_contract_details[ "smallest_low_side_price" ] = low_side;
+            var longer_liquidation = Number( ( ( 100000000 * amount ) / ( Number( sats ) + Number( sats - 546 ) ) ).toFixed( 2 ) );
+            var shorter_liquidation = Number( ( ( 100000000 * amount ) / 546 ).toFixed( 2 ) );
+            real_contract_details[ "longers_liquidation_price" ] = longer_liquidation;
+            real_contract_details[ "shorters_liquidation_price" ] = shorter_liquidation;
+            real_contract_details[ "shorters_bitcoin_address" ] = my_address;
+            sessionStorage[ "contract_without_counterparty_or_oracle" ] = JSON.stringify( real_contract_details );
+            console.log( [5], sats );
+            if ( claimed_contract ) {
+                real_contract_details[ "longers_bitcoin_address" ] = claimed_contract[ "longers_bitcoin_address" ];
+            } else {
+                real_contract_details[ "longers_bitcoin_address" ] = "";
+            }
+            if ( claimed_contract ) {
+                if ( !isValidInvoice( claimed_contract[ "longers_invoice" ] ) ) {
+                    alert( "oh no! They tried to send you an invalid invoice! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                console.log( [6], sats );
+                if ( getInvoiceAmount( claimed_contract[ "longers_invoice" ] ) != Number( sats ) ) {
+                    alert( `oh no! Aborting because they sent you an invoice for the wrong amount! What's in their invoice: ${getInvoiceAmount( claimed_contract[ "longers_invoice" ] )} Needed amount: ${Number( sats )}` );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "longers_key" ] != claimed_contract[ "longers_key" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "shorters_key" ] != claimed_contract[ "shorters_key" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "oracles_short_invoice" ] != claimed_contract[ "oracles_short_invoice" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "oracles_long_invoice" ] != claimed_contract[ "oracles_long_invoice" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "timestamp_of_start" ] != claimed_contract[ "timestamp_of_start" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "dollar_value" ] != claimed_contract[ "dollar_value" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "sats_deposit" ] != claimed_contract[ "sats_deposit" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( Math.abs( ( 1 - ( real_contract_details[ "starting_price" ] / claimed_contract[ "starting_price" ] ) ) * 100 ) > 1.5 ) {
+                    sendDM( `{"type":"abort","content":"Aborting because you and your counterparty did not have consensus on the bitcoin price, and your prices differed too much to work together. Your price: ${claimed_contract[ "starting_price" ]} Their price: ${real_contract_details[ "starting_price" ]} Consider trying again."}`, counterparty );
+                    var timeout = await waitSomeSeconds( 1 );
+                    alert( `oh no! Aborting because you and your counterparty did not have consensus on the bitcoin price, and your prices differed too much to work together. Your price: ${real_contract_details[ "starting_price" ]} Their price: ${claimed_contract[ "starting_price" ]} Consider trying again.` );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "smallest_high_side_price" ] != claimed_contract[ "smallest_high_side_price" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "smallest_low_side_price" ] != claimed_contract[ "smallest_low_side_price" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "longers_liquidation_price" ] != claimed_contract[ "longers_liquidation_price" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( real_contract_details[ "shorters_liquidation_price" ] != claimed_contract[ "shorters_liquidation_price" ] ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                sessionStorage[ "contract_without_oracle" ] = JSON.stringify( real_contract_details );
+                var message = {}
+                message[ "type" ] = "be my oracle";
+                message[ "content" ] = real_contract_details;
+                sendDM( JSON.stringify( message ), trusted_oracles[ 0 ].substring( 2 ) );
+            }
+            if ( !time ) {
+                var now = Math.floor( Date.now() / 1000 );
+                sessionStorage[ "start" ] = now;
+                var message = {}
+                message[ "type" ] = "offer";
+                var content = {}
+                content[ "amount" ] = amount;
+                content[ "start" ] = Number( sessionStorage[ "start" ] );
+                content[ "invoice" ] = invoice;
+                content[ "bitcoin_price" ] = Number( sessionStorage[ "bitcoin_price" ] );
+                content[ "partial_contract" ] = JSON.stringify( real_contract_details );
+                message[ "content" ] = content;
+                sendDM( JSON.stringify( message ), counterparty );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Waiting for your counterparty's invoice. This page will update automatically when it is submitted.</div>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+            }
+            loopBalance( amount, time );
+        }
+    </script>
+    <script>
+        function loopBalance( amount, time ) {
+            amount = Number( amount );
+            var bitcoin_price = sessionStorage[ "bitcoin_price" ];
+            document.getElementsByName( "bitcoin_price" )[ 0 ].value = "$" + String( Number( sessionStorage[ "bitcoin_price" ] ).toFixed( 2 ) );
+            var sats = ( amount / bitcoin_price ).toFixed( 8 ) * 100000000;
+            sats = sats.toFixed( 0 );
+            document.getElementsByName( "sats_balance" )[ 0 ].value = sats;
+            document.getElementsByName( "sats_difference" )[ 0 ].value = String( sats - Number( document.getElementsByName( "original_sats_balance" )[ 0 ].innerText ) );
+            if ( !document.getElementsByName( "sats_difference" )[ 0 ].value.startsWith( "-" ) && document.getElementsByName( "sats_difference" )[ 0 ].value != "0" ) {
+                document.getElementsByName( "sats_difference" )[ 0 ].value = "+" + document.getElementsByName( "sats_difference" )[ 0 ].value;
+            }
+            var now = Math.floor( Date.now() / 1000 );
+            if ( sessionStorage[ "start" ] ) {
+                time = Number( sessionStorage[ "start" ] );
+            }
+            if ( time ) {
+                var then = Number( time ) + 604800;
+            } else {
+                var then = now + 604800;
+                var time = now;
+            }
+            document.getElementsByName( "expiry" )[ 0 ].value = new Date( then * 1000 );
+            document.getElementsByName( "countdown" )[ 0 ].value = convertHMS( Math.floor( then - now ) );
+            setTimeout( function() {loopBalance( amount, time );}, 1000 );
+        }
+    </script>
+    <script>
+        function convertHMS( value ) {
+            if ( value < 0 ) {
+                value = 0;
+            }
+            const sec = parseInt(value, 10); // convert value to number if it's string
+            let years   = Math.floor(sec / 31536000); // get years
+            let months  = Math.floor((sec - (years * 31536000)) / 2592000); // get months
+            let days    = Math.floor((sec - (years * 31536000) - (months * 2592000)) / 86400); // get days
+            let hours   = Math.floor((sec - (years * 31536000) - (months * 2592000) - (days * 86400)) / 3600); // get hours
+            let minutes = Math.floor((sec - (years * 31536000) - (months * 2592000) - (days * 86400) - (hours * 3600)) / 60); // get minutes
+            let seconds = sec - (years * 31536000) - (months * 2592000) - (days * 86400) - (hours * 3600) - (minutes * 60); //  get seconds
+            var yearsstring = (years == 1) ? `year`:`years`;
+            var monthsstring = (months == 1) ?  `month`:`months`;
+            var daysstring = (days == 1) ? `day`:`days`;
+            var hoursstring = (hours == 1) ? `hour`:`hours`;
+            var minutesstring = (minutes == 1) ? `minute`:`minutes`;
+            var secondsstring = (seconds == 1) ? `second`:`seconds`;
+            return `${days} ${daysstring}, ${hours} ${hoursstring}, ${minutes} ${minutesstring}, and ${seconds} ${secondsstring} from now`;
+/*
+            if ( years > 0 ) {
+                return `${years} ${yearsstring} from now`;
+            }
+            if ( months > 0 ) {
+                return `${months} ${monthsstring} from now`;
+            }
+            if ( days > 0 ) {
+                return `${days} ${daysstring} from now`;
+            }
+            if ( hours > 0 ) {
+                return `${hours} ${hoursstring} from now`;
+            }
+            if ( minutes > 0 ) {
+                return `${minutes} ${minutesstring} from now`;
+            }
+            if ( seconds == 0 ) {
+                return `${seconds} seconds from now`;
+            }
+            return `${seconds} ${secondsstring} from now`;
+*/
+        }
+    </script>
+    <script>
+        async function openConnection( e ) {
+            console.log( "connected to " + relay );
+            var subscription = [ "REQ", subId, filter ];
+            socket.send( JSON.stringify( subscription ) );
+            num_of_fundraisers_by_creator = 0;
+        }
+    </script>
+    <script>
+        function checkHeartbeat() {
+            //console.log( "checking heartbeat" );
+            heartbeat = false;
+            var heartbeatsubId   = "00000002" + bitcoinjs.ECPair.makeRandom().privateKey.toString( "hex" ).substring( 8 );
+            var heartbeatfilter  = { "ids": [ "41ce9bc50da77dda5542f020370ecc2b056d8f2be93c1cedf1bf57efcab095b0" ] }
+            var heartbeatsub     = [ "REQ", heartbeatsubId, heartbeatfilter ];
+            if ( socket && socket.readyState != 0 ) {
+                socket.send( JSON.stringify( heartbeatsub ) );
+            }
+            setTimeout( function() {
+                var closer = [ "CLOSE", heartbeatsubId ];
+                if ( socket && socket.readyState != 0 ) {
+                    socket.send( JSON.stringify( closer ) );
+                }
+            }, 1500 );
+            setTimeout( function() {
+                if ( !heartbeat && socket.readyState == 3 ) {
+                    socket.removeEventListener( 'open', openConnection );
+                    socket.removeEventListener( 'message', handleMessage );
+                    socket = new WebSocket( relay );
+                    socket.addEventListener( 'open', openConnection );
+                    socket.addEventListener( 'message', handleMessage );
+                }
+            }, 2000 );
+        }
+    </script>
+    <script>
+        async function handleMessage( message ) {
+            var [ type, subId, event ] = JSON.parse( message.data );
+            var { kind, content } = event || {}
+            if ( !event ) return;
+            var sig_is_valid = await nobleSecp256k1.schnorr.verify( event.sig, event.id, event.pubkey );
+            if ( !sig_is_valid ) return;
+            if ( kind === 7065 || kind === 1 ) {
+                //console.log( content );
+            }
+            if ( kind === 20004 ) {
+                content = decrypt( nostr_privkey, event.pubkey, content );
+                decideNextSteps( content, event.pubkey );
+            }
+        }
+    </script>
+    <script>
+        async function decideNextSteps( content, counterparty ) {
+            if ( !isValidJson( content ) ) return;
+            var json = JSON.parse( content );
+            if ( !json[ "type" ] ) return;
+            if ( json[ "type" ] == "offer" ) {
+                var now = Math.floor( Date.now() / 1000 );
+                if ( !( json[ "content" ][ "amount" ] && json[ "content" ][ "start" ] && typeof( json[ "content" ][ "amount" ] ) == "number" && typeof( json[ "content" ][ "start" ] ) == "number" && json[ "content" ][ "start" ] + 15 > now && json[ "content" ][ "invoice" ] && json[ "content" ][ "bitcoin_price" ] && json[ "content" ][ "partial_contract" ] ) ) {
+                    alert( "oh no! Your counterparty may have tried to do something fishy by stating the contract should have started a long time ago. Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                if ( json[ "content" ][ "bitcoin_price" ] != Number( sessionStorage[ "bitcoin_price" ] ) ) {
+                    sendDM( `{"type":"abort","content":"Aborting because your bitcoin prices don't match. Yours: ${json[ "content" ][ "bitcoin_price" ]} Theirs: ${Number( sessionStorage[ "bitcoin_price" ] )} Consider trying against"}`, counterparty );
+                    var timeout = await waitSomeSeconds( 1 );
+                    alert( `oh no, bitcoin prices don't match! Theirs: ${json[ "content" ][ "bitcoin_price" ]} Mine: ${Number( sessionStorage[ "bitcoin_price" ] )} Consider trying again` );
+                    window.location.reload();
+                    return;
+                }
+                var expiry = new Date( ( json[ "content" ][ "start" ] + 604800 ) * 1000 );
+                var conf = confirm( `Do you want to go short on bitcoin with a $${String( json[ "content" ][ "amount" ] )}.00 contract? It will expire on ${expiry.toLocaleDateString()} at ${expiry.toLocaleTimeString()}` );
+                if ( !conf ) return;
+                if ( !isValidJson( json[ "content" ][ "partial_contract" ] ) ) {
+                    alert( "oh no! They tried to send you a bad contract!" );
+                    window.location.reload();
+                    return;
+                }
+                var contract = JSON.parse( json[ "content" ][ "partial_contract" ] );
+                submitter( json[ "content" ][ "amount" ], counterparty, json[ "content" ][ "start" ], json[ "content" ][ "bitcoin_price" ], contract );
+            }
+            if ( json[ "type" ] == "I'll be your oracle" ) {
+                if ( !( json[ "content" ] && json[ "content" ][ "sig" ] && json[ "content" ][ "oracles_long_invoice" ] && json[ "content" ][ "oracles_short_invoice" ] ) ) {
+                    alert( "oh no! They tried to send you a bad contract! Aborting" );
+                    window.location.reload();
+                    return;
+                }
+                var alt_json = JSON.parse( sessionStorage[ "contract_without_oracle" ] );
+                var contract_id = json[ "content" ][ "contract_id" ];
+                var oracles_long_invoice = json[ "content" ][ "oracles_long_invoice" ];
+                var oracles_short_invoice = json[ "content" ][ "oracles_short_invoice" ];
+                var sig = json[ "content" ][ "sig" ];
+                var signed_message = `I am the oracle in a "contract for difference" with this id: ${contract_id} between the people with these pubkeys: ${alt_json[ "longers_key" ]} and ${alt_json[ "shorters_key" ]}. This is my "long" lightning invoice: ${oracles_long_invoice}. It is conditional on this invoice being paid: ${alt_json[ "longers_invoice" ]}, the latter invoice belonging to the person going long in this contract. If an attempt is made to pay my long invoice (presumably by the person going short), I will delay forwarding the payment until one of two things happens, a timestamp arrives or a price arrives. The price is this: $${alt_json[ "shorters_liquidation_price" ]} If that price arrives before the contract terminates, it means the person going short should be liquidated, and I will try to do that by forwarding the payment of the person going short to the person going long – if he or she is online and cooperates. The timestamp is this: ${alt_json[ "timestamp_of_start" ] + 604800} If that timestamp arrives without anyone getting liquidated first, I will then choose to either settle it (as long as the person going long cooperates) or cancel it. I will cancel it in one of two circumstances. The first is if the price of bitcoin is lower than $${alt_json[ "smallest_low_side_price" ]}. The person going short should get their money back in that case so I will cancel their payment to the person going long. The second circumstance is if the price of bitcoin is higher than $${alt_json[ "smallest_high_side_price" ]} and I see a proof that the person going short proves they paid the person going long an amount of money that I deem sufficient to ensure that the person going short only walks away with $${alt_json[ "dollar_value" ]}, and the person going long gets the difference. The proof can take one of two forms: first, it can be a payment to this bitcoin address: ${alt_json[ "longers_bitcoin_address" ]}, or, second, it can be a lightning preimage for an invoice created by the person going long with the description "difference." If neither of those circumstances is true, I will not cancel the payment of (presumably) the person going short, instead I will try to forward the payment to the person going long, settling both invoices in the process. This is my "short" lightning invoice: ${oracles_short_invoice}. It is conditional on this invoice being paid: ${alt_json[ "shorters_invoice" ]}, the latter invoice belonging to the person going short in this contract. If an attempt is made to pay my "short" invoice (presumably by the person going long), I will delay forwarding the payment until one of two things happens, a timestamp arrives or a price arrives. The price is this: $${alt_json[ "longers_liquidation_price" ]} If that price arrives before the contract terminates, it means the person going long should be liquidated, and I will try to do that by forwarding the payment of the person going long to the person going short – if he or she is online and cooperates. The timestamp is this: ${alt_json[ "timestamp_of_start" ] + 604800} If that timestamp arrives without anyone getting liquidated first, I will then choose to either settle it (as long as the person going short cooperates) or cancel it. I will cancel it in one of two circumstances. The first is if the price of bitcoin is higher than $${alt_json[ "smallest_high_side_price" ]}. The person going long should get their money back in that case so I will cancel their payment to the person going short. The second circumstance is if the price of bitcoin is lower than $${alt_json[ "smallest_low_side_price" ]} and I see a proof that the person going long proves they paid the person going short an amount of money that I deem sufficient to ensure that the person going short walks away with $${alt_json[ "dollar_value" ]}. The proof can take one of two forms: first, it can be a payment to this bitcoin address: ${alt_json[ "shorters_bitcoin_address" ]}, or, second, it can be a lightning preimage for an invoice created by the person going short with the description "difference." If neither of those circumstances is true, I will not cancel the payment of (presumably) the person going long, instead I will try to forward the payment to the person going short, settling both invoices in the process.`;
+                var msghash = bitcoinjs.crypto.sha256( signed_message ).toString( "hex" );
+                var sig_is_valid = nobleSecp256k1.verify( sig, msghash, trusted_oracles[ 0 ] );
+                var real_shorters_hash = getinvoicepmthash( alt_json[ "shorters_invoice" ] );
+                var real_longers_hash = getinvoicepmthash( alt_json[ "longers_invoice" ] );
+                var claimed_shorters_hash = getinvoicepmthash( oracles_short_invoice );
+                var claimed_longers_hash = getinvoicepmthash( oracles_long_invoice );
+                if ( claimed_shorters_hash != real_shorters_hash || claimed_longers_hash != real_longers_hash ) {
+                    console.log( "Oh no, one of the oracle's invoices is not an escrow invoice! Abort!" );
+                    return;
+                }
+                if ( !sig_is_valid ) {
+                    console.log( "Oh no, the oracle did not sign the right thing! Abort!" );
+                    console.log( [1], "Here is what they were supposed to sign:" );
+                    console.log( signed_message );
+                    return;
+                }
+                sessionStorage[ "contract_id" ] = contract_id;
+                sessionStorage[ "longers_invoice" ] = alt_json[ "longers_invoice" ];
+                alt_json[ "oracles_short_invoice" ] = oracles_short_invoice;
+                alt_json[ "oracles_long_invoice" ] = oracles_long_invoice;
+                alt_json[ "oracles_signature" ] = sig;
+                alt_json[ "contract_id" ] = contract_id;
+                var message = {}
+                message[ "type" ] = "oracle found";
+                message[ "content" ] = alt_json;
+                sendDM( JSON.stringify( message ), alt_json[ "longers_key" ] );
+                sessionStorage[ "point_of_no_return" ] = true;
+                sessionStorage[ "full_contract" ] = JSON.stringify( alt_json );
+                var a = document.createElement( "a" );
+                a.href = "lightning:" + oracles_long_invoice.toLowerCase();
+                a.target = "_blank";
+                a.append( createQR( oracles_long_invoice.toUpperCase() ) );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).append( a );
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Please pay this lightning invoice: ${oracles_long_invoice}</div>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+                checkStatusesOnLoop( real_longers_hash, real_shorters_hash, trusted_oracles[ 0 ].substring( 2 ) );
+            }
+            if ( json[ "type" ] == "oracle found" ) {
+                console.log( "oracle found!", json );
+                //todo: validate that the json contains what I expect
+                var alt_json = JSON.parse( sessionStorage[ "contract_without_counterparty_or_oracle" ] );
+                var contract_id = json[ "content" ][ "contract_id" ];
+                var oracles_long_invoice = json[ "content" ][ "oracles_long_invoice" ];
+                var oracles_short_invoice = json[ "content" ][ "oracles_short_invoice" ];
+                var sig = json[ "content" ][ "oracles_signature" ];
+                var signed_message = `I am the oracle in a "contract for difference" with this id: ${contract_id} between the people with these pubkeys: ${alt_json[ "longers_key" ]} and ${alt_json[ "shorters_key" ]}. This is my "long" lightning invoice: ${oracles_long_invoice}. It is conditional on this invoice being paid: ${json[ "content" ][ "longers_invoice" ]}, the latter invoice belonging to the person going long in this contract. If an attempt is made to pay my long invoice (presumably by the person going short), I will delay forwarding the payment until one of two things happens, a timestamp arrives or a price arrives. The price is this: $${alt_json[ "shorters_liquidation_price" ]} If that price arrives before the contract terminates, it means the person going short should be liquidated, and I will try to do that by forwarding the payment of the person going short to the person going long – if he or she is online and cooperates. The timestamp is this: ${alt_json[ "timestamp_of_start" ] + 604800} If that timestamp arrives without anyone getting liquidated first, I will then choose to either settle it (as long as the person going long cooperates) or cancel it. I will cancel it in one of two circumstances. The first is if the price of bitcoin is lower than $${alt_json[ "smallest_low_side_price" ]}. The person going short should get their money back in that case so I will cancel their payment to the person going long. The second circumstance is if the price of bitcoin is higher than $${alt_json[ "smallest_high_side_price" ]} and I see a proof that the person going short proves they paid the person going long an amount of money that I deem sufficient to ensure that the person going short only walks away with $${alt_json[ "dollar_value" ]}, and the person going long gets the difference. The proof can take one of two forms: first, it can be a payment to this bitcoin address: ${json[ "content" ][ "longers_bitcoin_address" ]}, or, second, it can be a lightning preimage for an invoice created by the person going long with the description "difference." If neither of those circumstances is true, I will not cancel the payment of (presumably) the person going short, instead I will try to forward the payment to the person going long, settling both invoices in the process. This is my "short" lightning invoice: ${oracles_short_invoice}. It is conditional on this invoice being paid: ${alt_json[ "shorters_invoice" ]}, the latter invoice belonging to the person going short in this contract. If an attempt is made to pay my "short" invoice (presumably by the person going long), I will delay forwarding the payment until one of two things happens, a timestamp arrives or a price arrives. The price is this: $${alt_json[ "longers_liquidation_price" ]} If that price arrives before the contract terminates, it means the person going long should be liquidated, and I will try to do that by forwarding the payment of the person going long to the person going short – if he or she is online and cooperates. The timestamp is this: ${alt_json[ "timestamp_of_start" ] + 604800} If that timestamp arrives without anyone getting liquidated first, I will then choose to either settle it (as long as the person going short cooperates) or cancel it. I will cancel it in one of two circumstances. The first is if the price of bitcoin is higher than $${alt_json[ "smallest_high_side_price" ]}. The person going long should get their money back in that case so I will cancel their payment to the person going short. The second circumstance is if the price of bitcoin is lower than $${alt_json[ "smallest_low_side_price" ]} and I see a proof that the person going long proves they paid the person going short an amount of money that I deem sufficient to ensure that the person going short walks away with $${alt_json[ "dollar_value" ]}. The proof can take one of two forms: first, it can be a payment to this bitcoin address: ${alt_json[ "shorters_bitcoin_address" ]}, or, second, it can be a lightning preimage for an invoice created by the person going short with the description "difference." If neither of those circumstances is true, I will not cancel the payment of (presumably) the person going long, instead I will try to forward the payment to the person going short, settling both invoices in the process.`;
+                var msghash = bitcoinjs.crypto.sha256( signed_message ).toString( "hex" );
+                var sig_is_valid = nobleSecp256k1.verify( sig, msghash, trusted_oracles[ 0 ] );
+                var real_shorters_hash = getinvoicepmthash( alt_json[ "shorters_invoice" ] );
+                var real_longers_hash = getinvoicepmthash( json[ "content" ][ "longers_invoice" ] );
+                var claimed_shorters_hash = getinvoicepmthash( oracles_short_invoice );
+                var claimed_longers_hash = getinvoicepmthash( oracles_long_invoice );
+                if ( claimed_shorters_hash != real_shorters_hash || claimed_longers_hash != real_longers_hash ) {
+                    console.log( "Oh no, one of the oracle's invoices is not an escrow invoice! Abort!" );
+                    return;
+                }
+                if ( !sig_is_valid ) {
+                    console.log( "Oh no, the oracle did not sign the right thing! Abort!" );
+                    console.log( [2], "Here is what they were supposed to sign:" );
+                    console.log( signed_message );
+                    return;
+                }
+                sessionStorage[ "contract_id" ] = contract_id;
+                sessionStorage[ "longers_invoice" ] = json[ "content" ][ "longers_invoice" ];
+                console.log( "yay, the sig checks out in the 'oracle found' section!" );
+                sessionStorage[ "point_of_no_return" ] = true;
+                sessionStorage[ "full_contract" ] = JSON.stringify( json[ "content" ] );
+                var a = document.createElement( "a" );
+                a.href = "lightning:" + oracles_long_invoice.toLowerCase();
+                a.target = "_blank";
+                a.append( createQR( oracles_long_invoice.toUpperCase() ) );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).append( a );
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Please pay this lightning invoice: ${oracles_long_invoice}</div>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+                checkStatusesOnLoop( real_longers_hash, real_shorters_hash, trusted_oracles[ 0 ].substring( 2 ) );
+            }
+            if ( json[ "type" ] == "invoice status" ) {
+                if ( counterparty != trusted_oracles[ 0 ].substring( 2 ) ) return;
+                console.log( "invoice status:", json[ "content" ] );
+                if ( json[ "content" ][ "hash" ] == getinvoicepmthash( sessionStorage[ "longers_invoice" ] ) && json[ "content" ][ "status" ] == "ACCEPTED" ) {
+                    sessionStorage[ "shorters_payment_pending" ] = true;
+                    if ( !sessionStorage[ "longers_payment_pending" ] ) {
+                        document.getElementById( "modal" ).innerHTML = "";
+                        document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Waiting for your counterparty to deposit money into the contract. This page will update automatically when they do.</div>`;
+                        document.getElementById( "black-bg" ).style.display = "block";
+                        document.getElementById( "modal" ).style.display = "block";
+                    }
+                }
+                if ( json[ "content" ][ "hash" ] == getinvoicepmthash( sessionStorage[ "shorters_invoice" ] ) && json[ "content" ][ "status" ] == "ACCEPTED" ) {
+                    sessionStorage[ "longers_payment_pending" ] = true;
+                    if ( sessionStorage[ "shorters_payment_pending" ] ) {
+                        modalVanish([1]);
+                    } else {
+                        console.log( "I did not make the modal disappear because the shorter didn't pay yet:", sessionStorage[ "shorters_payment_pending" ] );
+                    }
+                    console.log( "the longers payment is pending:", json[ "content" ][ "status" ] );
+                }
+                if ( sessionStorage[ "settlement_hodl_invoice" ] && json[ "content" ][ "hash" ] == getinvoicepmthash( sessionStorage[ "settlement_hodl_invoice" ] ) && json[ "content" ][ "status" ] == "ACCEPTED" ) {
+                    sessionStorage[ "settlement_payment_pending" ] = true;
+                    document.getElementById( "modal" ).innerHTML = "";
+                    if ( sessionStorage[ "i_must_pay" ] ) {
+                        document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">You paid! The contract is now settled. You can safely close your window.</div>`;
+                    }
+                    if ( sessionStorage[ "i_get_paid" ] ) {
+                        document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">You got paid, check your wallet! The contract is now settled and you can safely close your window.</div>`;
+                    }
+                    document.getElementById( "black-bg" ).style.display = "block";
+                    document.getElementById( "modal" ).style.display = "block";
+                }
+            }
+            if ( json[ "type" ] == "send to longer" ) {
+                sessionStorage[ "i_must_pay" ] = true;
+                if ( counterparty != trusted_oracles[ 0 ].substring( 2 ) ) return;
+                console.log( "here is how many sats you owe the longer:", json[ "content" ] );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">You owe your counterparty ${json[ "content" ]} sats. Waiting for their invoice. This page will update automatically when they submit it.</div>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+            }
+            if ( json[ "type" ] == "get from longer" ) {
+                sessionStorage[ "i_get_paid" ] = true;
+                if ( counterparty != trusted_oracles[ 0 ].substring( 2 ) ) return;
+                console.log( "here is how many sats the longer owes you:", json[ "content" ] );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Your counterparty needs to pay you some sats to restore the same dollar value you started with. Paste a lightning invoice for ${json[ "content" ]} sats.</div>`;
+                document.getElementById( "modal" ).innerHTML += '<p><input type="text" id="settlement_invoice" name="settlement_invoice"></p>';
+                document.getElementById( "modal" ).innerHTML += `<p><button type="button" id="submit-settlement-invoice" name="submit-settlement-invoice" onclick='submitSettlementInvoice( document.getElementsByName( "settlement_invoice" )[ 0 ].value )'>Submit</button></p>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+                var invoice = await waitForSettlementInvoice();
+                console.log( "settlement invoice:", invoice );
+                var message = {}
+                message[ "type" ] = "settlement invoice";
+                var content = {}
+                content[ "hash" ] = sessionStorage[ "contract_id" ];
+                content[ "settlement_invoice" ] = invoice;
+                message[ "content" ] = content;
+                sendDM( JSON.stringify( message ), trusted_oracles[ 0 ].substring( 2 ) );
+                sessionStorage[ "settlement_hodl_invoice" ] = invoice;
+                checkSettlementOnLoop( getinvoicepmthash( invoice ), trusted_oracles[ 0 ].substring( 2 ) );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Waiting for your counterparty to pay you your sats. If they refuse, you will get everything they deposited at the start of the contract.</div>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+            }
+            if ( json[ "type" ] == "time to settle" ) {
+                if ( counterparty != trusted_oracles[ 0 ].substring( 2 ) ) return;
+                sessionStorage[ "settlement_hodl_invoice" ] = json[ "content" ];
+                var a = document.createElement( "a" );
+                a.href = "lightning:" + json[ "content" ].toLowerCase();
+                a.target = "_blank";
+                a.append( createQR( json[ "content" ].toUpperCase() ) );
+                document.getElementById( "modal" ).innerHTML = "";
+                document.getElementById( "modal" ).append( a );
+                document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Please pay this lightning invoice: ${json[ "content" ]}</div>`;
+                document.getElementById( "black-bg" ).style.display = "block";
+                document.getElementById( "modal" ).style.display = "block";
+                var hash = getinvoicepmthash( json[ "content" ] );
+                var oracle = trusted_oracles[ 0 ].substring( 2 );
+                checkSettlementOnLoop( hash, oracle );
+            }
+            if ( json[ "type" ] == "abort" && !sessionStorage[ "point_of_no_return" ] ) {
+                alert( json[ "content" ] );
+                window.location.reload();
+            }
+        }
+    </script>
+    <script>
+        function checkStatusesOnLoop( hash1, hash2, oracle ) {
+            var note_to_oracle = {}
+            note_to_oracle[ "type" ] = "get invoice status";
+            note_to_oracle[ "content" ] = hash1;
+            if ( !sessionStorage[ "shorters_payment_pending" ] ) {
+                sendDM( JSON.stringify( note_to_oracle ), oracle );
+            }
+            var note_to_oracle = {}
+            note_to_oracle[ "type" ] = "get invoice status";
+            note_to_oracle[ "content" ] = hash2;
+            if ( !sessionStorage[ "longers_payment_pending" ] ) {
+                sendDM( JSON.stringify( note_to_oracle ), oracle );
+            }
+            setTimeout( function() {if ( !sessionStorage[ "longers_payment_pending" ] || !sessionStorage[ "shorters_payment_pending" ] ) {checkStatusesOnLoop( hash1, hash2, oracle );} else {modalVanish([2]);}}, 5000 );
+        }
+    </script>
+    <script>
+        function checkSettlementOnLoop( hash, oracle ) {
+            var note_to_oracle = {}
+            note_to_oracle[ "type" ] = "get invoice status";
+            note_to_oracle[ "content" ] = hash;
+            if ( !sessionStorage[ "settlement_payment_pending" ] ) {
+                sendDM( JSON.stringify( note_to_oracle ), oracle );
+            }
+            setTimeout( function() {if ( !sessionStorage[ "settlement_payment_pending" ] ) {checkSettlementOnLoop( hash, oracle );}}, 5000 );
+        }
+    </script>
+    <script>
+        var nostr_keypair = bitcoinjs.ECPair.makeRandom();
+        var nostr_privkey = nostr_keypair.privateKey.toString( "hex" );
+        var nostr_pubkey = nostr_keypair.publicKey.toString( "hex" ).substring( 2 );
+        document.getElementsByName( "shorters_pubkey" )[ 0 ].value = nostr_pubkey;
+        trusted_oracles = [];
+        trusted_oracles.push( "031e73065755118265475031005a8b7b4a576d203b0114bb6ca24d4e82822614a4" );
+        var relay = "wss://relay.damus.io";
+        var socket = new WebSocket( relay );
+        socket.addEventListener( 'message', handleMessage );
+        var subId   = bitcoinjs.ECPair.makeRandom().privateKey.toString( "hex" );
+        var filter  = { "#p": [ nostr_pubkey ] }
+        socket.addEventListener( 'open', openConnection );
+
+        async function sendDM( message, recipient ) {
+            var encrypted_message = encrypt( nostr_privkey, recipient, message )
+            var encrypted_event = {
+                "content"    : encrypted_message,
+                "created_at" : Math.floor( Date.now() / 1000 ),
+                "kind"       : 20004,
+                "tags"       : [ [ 'p', recipient ] ],
+                "pubkey"     : nostr_pubkey,
+            }
+            var signedEncryptedEvent = await getSignedEvent( encrypted_event, nostr_privkey );
+            socket.send( JSON.stringify( [ "EVENT", signedEncryptedEvent ] ) );
+        }
+
+        async function sendFundingInfo( message, fundraiser_pubkey ) {
+            var event = {
+                "content"    : message,
+                "created_at" : Math.floor( Date.now() / 1000 ),
+                "kind"       : 4239,
+                "tags"       : [ [ 'p', fundraiser_pubkey ] ],
+                "pubkey"     : nostr_pubkey,
+            }
+            var signedEvent = await getSignedEvent( event, nostr_privkey );
+            console.log( 'signedEvent:', signedEvent );
+            socket.send( JSON.stringify( [ "EVENT", signedEvent ] ) );
+        }
+
+        async function getSignedEvent(event, privateKey) {
+            var eventData = JSON.stringify([
+                0,                    // Reserved for future use
+                event['pubkey'],        // The sender's public key
+                event['created_at'],    // Unix timestamp
+                event['kind'],        // Message “kind” or type
+                event['tags'],        // Tags identify replies/recipients
+                event['content']        // Your note contents
+            ])
+            event.id  = bitcoinjs.crypto.sha256( eventData ).toString( 'hex' );
+            event.sig = await nobleSecp256k1.schnorr.sign( event.id, privateKey );
+            return event;
+        }
+        function hexToBytes( hex ) {
+            return Uint8Array.from( hex.match( /.{1,2}/g ).map( ( byte ) => parseInt( byte, 16 ) ) );
+        }
+
+        function bytesToHex( bytes ) {
+            return bytes.reduce( ( str, byte ) => str + byte.toString( 16 ).padStart( 2, '0' ), '' );
+        }
+        function base64ToHex( str ) {
+            var raw = atob( str );
+            var result = '';
+            var i; for ( i=0; i<raw.length; i++ ) {
+                var hex = raw.charCodeAt( i ).toString( 16 );
+                result += ( hex.length === 2 ? hex : '0' + hex );
+            }
+            return result;
+        }
+        function encrypt( privkey, pubkey, text ) {
+            var key = nobleSecp256k1.getSharedSecret( privkey, '02' + pubkey, true ).substring( 2 );
+            var iv = window.crypto.getRandomValues( new Uint8Array( 16 ) );
+            var cipher = browserifyCipher.createCipheriv( 'aes-256-cbc', hexToBytes( key ), iv );
+            var encryptedMessage = cipher.update(text,"utf8","base64");
+            emsg = encryptedMessage + cipher.final( "base64" );
+            var uint8View = new Uint8Array( iv.buffer );
+            var decoder = new TextDecoder();
+            return emsg + "?iv=" + btoa( String.fromCharCode.apply( null, uint8View ) );
+        }
+        function decrypt( privkey, pubkey, ciphertext ) {
+            var [ emsg, iv ] = ciphertext.split( "?iv=" );
+            var key = nobleSecp256k1.getSharedSecret( privkey, '02' + pubkey, true ).substring( 2 );
+            var decipher = browserifyCipher.createDecipheriv(
+                'aes-256-cbc',
+                hexToBytes( key ),
+                hexToBytes( base64ToHex( iv ) )
+            );
+            var decryptedMessage = decipher.update( emsg, "base64" );
+            dmsg = decryptedMessage + decipher.final( "utf8" );
+            return dmsg;
+        }
+    </script>
+    <script>
+        function getBitcoinPrice() {
+          return new Promise( function( resolve, reject ) {
+            var xhttp = new XMLHttpRequest();
+              xhttp.onreadystatechange = function() {
+                if ( this.readyState == 4 && this.status == 200 ) {
+                var json = JSON.parse( xhttp.responseText );
+                var price = json[ "data" ][ "amount" ];
+                resolve( price );
+              }
+            };
+            xhttp.open( "GET", "https://api.coinbase.com/v2/prices/BTC-USD/spot", true );
+            xhttp.send();
+          });
+        }
+    </script>
+    <script>
+        function getinvoicepmthash( invoice ) {
+            var decoded = bolt11.decode( invoice );
+            var i; for ( i=0; i<decoded[ "tags" ].length; i++ ) {
+                if ( decoded[ "tags" ][ i ][ "tagName" ] == "payment_hash" ) {
+                    var pmthash = decoded[ "tags" ][ i ][ "data" ].toString();
+                }
+            }
+            return pmthash;
+        }
+    </script>
+    <script>
+        function getInvoiceAmount( invoice ) {
+            var decoded = bolt11.decode( invoice );
+            var amount = decoded[ "satoshis" ].toString();
+            return amount;
+        }
+    </script>
+    <script>
+        async function doBackgroundTasks() {
+            checkHeartbeat();
+            sessionStorage[ "bitcoin_price" ] = await getBitcoinPrice();
+            autoWin();
+            setTimeout( function() {doBackgroundTasks();}, 10000 );
+        }
+        doBackgroundTasks();
+    </script>
+    <script>
+        function isValidJson( content ) {
+                try {  
+                    var json = JSON.parse( content );
+                } catch ( e ) {
+                    return false;  
+                }
+                return true;
+        }
+    </script>
+    <script>
+        function autoWin() {
+            sessionStorage.removeItem( "i_gain_money" );
+            sessionStorage.removeItem( "i_lose_money" );
+            if ( !sessionStorage[ "point_of_no_return" ] ) return;
+            var contract = JSON.parse( sessionStorage[ "full_contract" ] );
+            var now = Math.floor( Date.now() / 1000 );
+            var end_time = contract[ "timestamp_of_start" ] + 604800;
+            var force_end_time = end_time + 3600;
+            //todo: reverse this because now > end_time means "if the current time is past the time when the contract ends" i.e. "after the contract ended" -- and in reality, when not testing, I only want to run this code after the contract ended, whereas right now I am telling this function to stop (return) in that case
+//            if ( now < end_time ) return;
+            if ( now > end_time ) return;
+            if ( Number( sessionStorage[ "bitcoin_price" ] ) > contract[ "starting_price" ] ) {
+                sessionStorage[ "i_lose_money" ] = true;
+            }
+            if ( Number( sessionStorage[ "bitcoin_price" ] ) < contract[ "starting_price" ] ) {
+                sessionStorage[ "i_gain_money" ] = true;
+            }
+            console.log( "yay! It is time to settle" );
+            //todo: reverse the time part
+            if ( sessionStorage[ "i_gain_money" ] && now < end_time ) {
+                //wait for counterparty, then call the settle() function
+                if ( !sessionStorage[ "show_up_countdown_started" ] ) {
+                    document.getElementById( "modal" ).innerHTML = "";
+                    document.getElementById( "modal" ).innerHTML += `<div align="center" style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em;">Waiting for your counterparty. The contract ended at ${new Date( contract[ "timestamp_of_start" ] + 604800 ).toLocaleTimeString()} and they have an hour to show up.</div>`;
+                    document.getElementById( "modal" ).innerHTML += `<div style="overflow-wrap: break-word; margin-bottom: 20px; font-size: .8em; text-align: left;">Countdown</div>`;
+                    document.getElementById( "modal" ).innerHTML += '<p><input type="text" id="show_up_countdown" name="show_up_countdown" value="5 minutes" disabled></p>';
+                    document.getElementById( "black-bg" ).style.display = "block";
+                    document.getElementById( "modal" ).style.display = "block";
+                    sessionStorage[ "show_up_countdown_started" ] = true;
+                    showUpCountdown( contract[ "timestamp_of_start" ] + 604800 + 3600 );
+                }
+                var sats_deserved_by_shorter = ( contract[ "dollar_value" ] / Number( bitcoin_price ) ).toFixed( 8 ) * 100000000;
+                var sats_deposited = contract[ "sats_deposit" ];
+                var difference = Math.abs( sats_deserved_by_shorter - sats_deposited );
+            }
+            if ( sessionStorage[ "i_gain_money" ] && now > force_end_time ) {
+                //call forceWin(); see index.js for more info
+                //if you call forceWin(), pass a contract id and a settlement invoice to the oracle, where the settlement invoice is for the value of contract[ "sats_deposit" ]
+            }
+        }
+    </script>
+    <script>
+        function showUpCountdown( then ) {
+            var now = Math.floor( Date.now() / 1000 );
+            var time = convertHMS( Math.floor( then - now ) )
+            document.getElementsByName( "show_up_countdown" )[ 0 ].value = time.substring( time.indexOf( "minute" ) - 3, time.length );
+            setTimeout( function() {showUpCountdown( then );}, 1000 );
+        }
+    </script>
+    <script>
+        function modalVanish(type) {
+            console.log( "type of vanish:", type );
+            document.getElementById( "black-bg" ).style.display = "none";
+            document.getElementById( "modal" ).style.display = "none";
+        }
+    </script>
+    <div id="black-bg" onclick="modalVanish([3]);"></div>
+    <div id="modal"></div>
+</body>
+</html>
